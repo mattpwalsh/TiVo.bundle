@@ -18,9 +18,13 @@
 	<string>0.7</string>
 	<key>PlexClientPlatforms</key>
 	<string>MacOSX</string>
+	<key>PlexMediaContainer</key>
+	<string>TS</string>
 	<key>PlexPluginDebug</key>
 	<string>1</string>
 	<key>PlexPluginMode</key>
 	<string>AlwaysOn</string>
+	<key>PlexVideoCodec</key>
+	<string>MPEG2?</string>
 </dict>
 </plist>
