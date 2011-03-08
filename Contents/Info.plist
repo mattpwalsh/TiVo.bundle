@@ -17,7 +17,7 @@
 	<key>CFBundleVersion</key>
 	<string>0.7</string>
 	<key>PlexClientPlatforms</key>
-	<string>MacOSX</string>
+	<string>MacOSX,LGTV</string>
 	<key>PlexMediaContainer</key>
 	<array>
 		<string>TS</string>
