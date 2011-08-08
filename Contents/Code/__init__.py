@@ -241,9 +241,15 @@ class MyVideoHandler(BaseHTTPRequestHandler):
 #      tivodecode = Popen([tvd, "-m", Prefs.Get("MAC"), "-"], stdin=urlhandle, stdout=PIPE)
 
       curlp = Popen(["/usr/bin/curl", url, "--digest", "-s", "-u", "tivo:"+Prefs.Get("MAC"), "-c", "/tmp/cookies.txt"], stdout=PIPE)
-      tivodecode = Popen([tvd, "-m", Prefs.Get("MAC"), "-"], stdin=curlp.stdout, stdout=self.wfile)
+      tivodecode = Popen([tvd, "-m", Prefs.Get("MAC"), "-"],stdin=curlp.stdout, stdout=PIPE)
+      while True:
+          data = tivodecode.stdout.read(4192)
+          if not data:
+              break
+          self.wfile.write(data)
 
-      tivodecode.communicate()
+
+      #tivodecode.communicate()
 
     except IOError, e:
       Log.Add("Got an IO Error")
