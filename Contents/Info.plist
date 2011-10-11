@@ -25,7 +25,7 @@
 	<key>PlexPluginDebug</key>
 	<string>1</string>
 	<key>PlexPluginMode</key>
-	<string>AlwaysOn</string>
+	<string>Daemon</string>
 	<key>PlexVideoCodec</key>
 	<array>
 		<string>MPEG2?</string>
