@@ -1,19 +1,31 @@
-from time import sleep
+from time import sleep, time
 from subprocess import *
-from os import kill, chmod
+import os
 from signal import *
 import urllib2, cookielib, os.path
 from lxml import etree
 from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
+from SocketServer import ThreadingMixIn
 import base64
 import string
 import socket
 import thread
+import pybonjour
+import select
+import re
+import sys
+import ctypes
+try:
+    from Queue import Queue, Empty
+except ImportError:
+    from queue import Queue, Empty
+    
+ON_POSIX = 'posix' in sys.builtin_module_names
 
-from PMS import Plugin, Log, XML, HTTP, JSON, Prefs
-from PMS.MediaXML import MediaContainer, DirectoryItem, WebVideoItem, VideoItem, SearchDirectoryItem
-from PMS.FileTypes import PLS
-from PMS.Shorthand import _L
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    pass
+
+
 
 TIVO_CONTENT_FOLDER     = "x-tivo-container/folder"
 TIVO_CONTENT_SHOW_TTS   = "video/x-tivo-raw-tts"
@@ -37,60 +49,34 @@ CookiesJar  = cookielib.LWPCookieJar()
 ####################################################################################################
 
 def Start():
-  Plugin.AddRequestHandler(TIVO_PLUGIN_PREFIX, HandleRequest, "TiVo", "icon-default.jpg", "art-default.jpg")
-  Plugin.AddViewGroup("InfoList", viewMode="InfoList", contentType="items")  
-  Prefs.Expose("MAC", "Media Access Key")
-  path = Plugin.DataPath + CookiesFile
-  tvd = Plugin.ResourceFilePath("tivodecode")
-  os.chmod(tvd, 0755)
-  if os.path.isfile(path):
-    CookiesJar.load(path)
+  Plugin.AddPrefixHandler(TIVO_PLUGIN_PREFIX, getTivoNames, "TiVo", "icon-default.jpg", "art-default.jpg")
+  Plugin.AddViewGroup("InfoList", viewMode="InfoList", mediaType="items")  
+  
+  tvd = Resource.ExternalPath("tivodecode")
+  if Platform.OS == 'Windows':
+		tvd = Resource.ExternalPath("tivodecode.exe")
+  Log.Debug(tvd)
+  #os.chmod(tvd, 0755)
+  Thread.Create(findTivos)
+  Thread.Create(TivoServerThread, ip=Network.Address, port=TIVO_PORT)
 
 ####################################################################################################
   
-def HandleRequest(pathNouns, count):
-  
-  # TODO: Metadata!
-
-  if count == 0:
-    return getTivoNames()
-
-  else:
-    if (pathNouns[0] == TIVO_BY_NAME):
-      return getTivoShows(pathNouns[1])
-    if (pathNouns[0] == TIVO_BY_IP_SHOW):
-      return getTivoEpisodes(pathNouns[1], pathNouns[2], pathNouns[3])
-    if (pathNouns[0] == TIVO_GET_SHOW):
-      return TivoVideo(count, pathNouns)
-    if (pathNouns[0] == TIVO_PREFS):
-      return TivoPrefs(count, pathNouns)
-
-####################################################################################################
-
 def getTivoNames():
-    dir = MediaContainer('art-default.jpg', title1="TiVo")
+    dir = MediaContainer(R('art-default.jpg'), title1="TiVo")
 
-    myMAC = Prefs.Get("MAC")
-    if myMAC == None:
-      myMAC = ""
-    if (len(myMAC) == 10):
-      p1 = Popen(["mDNS", "-B", "_tivo-videos._tcp", "local"], stdout=PIPE)
-      p2 = Popen(["colrm", "1", "74"], stdin=p1.stdout, stdout=PIPE)
-      p3 = Popen(["grep", "-v", "Instance Name"], stdin=p2.stdout, stdout=PIPE)
-      p4 = Popen(["sort"], stdin=p3.stdout, stdout=PIPE)
-      p5 = Popen(["uniq"], stdin=p4.stdout, stdout=PIPE)
-      sleep(2)
-      kill(p1.pid, SIGTERM)
-      tivolist = p5.communicate()[0]
+    myMAK = Prefs["MAK"]
+    if myMAK == None:
+      myMAK = ""
+    if (len(myMAK) == 10):
+		tivo_list = Dict['tivos']
+		Log.Debug(tivo_list)
+		for tivo in tivo_list:
+			dir.Append(Function(DirectoryItem(getTivoShows, tivo), tivoName = tivo))
 
-      for line in tivolist.split('\n'):
-        curtivo = line.lstrip().rstrip()
-        if len(curtivo) > 0:
-          Log.Add("Adding %s" % curtivo)
-          dir.AppendItem(DirectoryItem(TIVO_PLUGIN_PREFIX + "/" + TIVO_BY_NAME + "/" + curtivo, curtivo, ""))    
 
-    dir.AppendItem(SearchDirectoryItem(TIVO_PLUGIN_PREFIX + "/" + TIVO_PREFS + "/MAC", "Set your Media Access Key" , "Set your Media Access Key  [" + myMAC +"] ", ""))
-    return dir.ToXML()
+    dir.Append(PrefsItem("Preferences"))
+    return dir
 
 ####################################################################################################
 
@@ -103,23 +89,19 @@ def TivoPrefs(count, pathNouns):
 
 ####################################################################################################
 
-def getTivoShows(tivoName):
-  dir = MediaContainer('art-default.jpg', title1="TiVo", title2=tivoName)
+def getTivoShows(sender,tivoName):
+  Log.Debug(tivoName)
+  dir = MediaContainer(R('art-default.jpg'), title1="TiVo", title2=tivoName)
 
-  p1 = Popen(["mDNS", "-L", tivoName, "_tivo-videos._tcp", "local"], stdout=PIPE)
-  p2 = Popen(["grep", "443"], stdin=p1.stdout, stdout=PIPE)
-  p3 = Popen(["cut", "-c", "43-57"], stdin=p2.stdout, stdout=PIPE)
-  sleep(2)
-  kill(p1.pid, SIGTERM)
-  tivolines = p3.communicate()[0]
-  tivoip = tivolines.split()[0]
+  hostname = Dict['tivos'][tivoName]['hosttarget']
+  tivoip = Dict['tivos'][tivoName]['ip']
   url = "https://" + tivoip + ":443" + TIVO_LIST_PATH
   return getTivoShowsByIPURL(tivoip, url, dir, 1)
 
 ####################################################################################################
 
-def getTivoEpisodes(tivoip, show_id, showname):
-  dir = MediaContainer('art-default.jpg', title1="TiVo", title2=showname)
+def getTivoEpisodes(sender, tivoip, show_id, showname):
+  dir = MediaContainer(R('art-default.jpg'), title1="TiVo", title2=showname)
   url = "https://" + tivoip + ":443" + TIVO_LIST_PATH + "%2F" + show_id
   if showname == "HD Recordings" or showname == "TiVo Suggestions":
     return getTivoShowsByIPURL(tivoip, url, dir, 1)
@@ -129,25 +111,26 @@ def getTivoEpisodes(tivoip, show_id, showname):
 ####################################################################################################
 
 def getTivoShowsByIPURL(tivoip, url, dir, expand_name):
-  dir.SetViewGroup("InfoList")
+  
+  dir.viewGroup ="InfoList"
   try:
     authhandler = urllib2.HTTPDigestAuthHandler()
-    authhandler.add_password("TiVo DVR", "https://" + tivoip + ":443/", "tivo", Prefs.Get("MAC"))
+    authhandler.add_password("TiVo DVR", "https://" + tivoip + ":443/", "tivo", Prefs["MAK"])
     opener = urllib2.build_opener(authhandler)
     pagehandle = opener.open(url)
   except IOError, e:
-    Log.Add("Got a URLError trying to open %s" % url)
+    Log.Debug("Got a URLError trying to open %s" % url)
     if hasattr(e, 'code'):
-      Log.Add("Failed with code : %s" % e.code)
+      Log.Debug("Failed with code : %s" % e.code)
       if (int(e.code) == 401):
-        dir.SetMessage("Couldn't authenticate", "Failed to authenticate to tivo.  Is the Media Access Key correct?")
+        dir = MessageContainer("Couldn't authenticate", "Failed to authenticate to tivo.  Is the Media Access Key correct?")
       else:
-        dir.SetMessage("Couldn't connect", "Failed to connect to tivo")
+        dir = MessageContainer("Couldn't connect", "Failed to connect to tivo")
     if hasattr(e, 'reason'):
-      Log.Add("Failed with reason : %s" % e.reason)
-    return dir.ToXML()
+      Log.Debug("Failed with reason : %s" % e.reason)
+    return dir
   except:
-    Log.Add ("Unexpected error trying to open %s" % url)
+    Log.Debug ("Unexpected error trying to open %s" % url)
     return
 
   myetree = etree.parse(pagehandle).getroot()
@@ -159,8 +142,8 @@ def getTivoShowsByIPURL(tivoip, url, dir, expand_name):
       show_total_items = int(getNameFromXML(show, "g:Details/g:TotalItems/text()"))
       show_folder_url = getNameFromXML(show, "g:Links/g:Content/g:Url/text()")
       show_folder_id = show_folder_url[show_folder_url.rfind("%2F")+3:]
-      item = DirectoryItem(TIVO_PLUGIN_PREFIX + "/" + TIVO_BY_IP_SHOW + "/" + tivoip + "/" + show_folder_id + "/" +show_name, "[" + show_name + "]", "/art-default.jpg")
-      dir.AppendItem(item)
+      item = Function(DirectoryItem(getTivoEpisodes, title="[" + show_name + "]", thumb=R("art-folder.png")), tivoip=tivoip, show_id=show_folder_id, showname=show_name)
+      dir.Append(item)
 
     elif ((show_content_type == TIVO_CONTENT_SHOW_TTS) or
           (show_content_type == TIVO_CONTENT_SHOW_PES)) :
@@ -189,17 +172,20 @@ def getTivoShowsByIPURL(tivoip, url, dir, expand_name):
       else:
         target_name = extra_name
       if show_copyright != "Yes" and show_in_progress != "Yes":
-        itempath = TIVO_PLUGIN_PREFIX + "/" +TIVO_GET_SHOW +"/" + tivoip +"/" + base64.b64encode(show_url, "_;") + "/" + base64.b64encode(show_name+" : "+extra_name, "_;")
-        item = VideoItem(itempath, target_name, show_desc, show_duration, "/art-default.jpg")
+        
+        url = "http://"+Network.Address+":" + str(TIVO_PORT) + "/" + tivoip + "/" + base64.b64encode(show_url, "_;")	
+        #itempath = TIVO_PLUGIN_PREFIX + "/" +TIVO_GET_SHOW +"/" + tivoip +"/" + base64.b64encode(show_url, "_;") + "/" + base64.b64encode(show_name+" : "+extra_name, "_;")
+        item = VideoItem(url,  title=target_name, summary=show_desc, duration=show_duration,thumb=R("art-video.png")) 
         if (show_episode_num != ""):
           subtitle = "Season " + show_season_num + "      Episode " + show_season_ep_num
-          item.SetAttr("subtitle",subtitle)
-        dir.AppendItem(item)
+          item.subtitle = subtitle
+        dir.Append(item)
 
     else:
-      Log.Add("Found a different content type: " + show_content_type)
+      Log.Debug("Found a different content type: " + show_content_type)
 
-  return dir.ToXML()
+  return dir
+
 
 ####################################################################################################
 
@@ -218,10 +204,11 @@ class MyVideoHandler(BaseHTTPRequestHandler):
     try:
       self.send_response(200)
       self.send_header('Content-Type', 'video/mpeg2')
+      self.send_header('Accept-Ranges', 'none')
       self.end_headers()
       return
     except:
-      Log.Add("Got an Error")
+      Log.Debug("Got an Error")
 
   def do_GET(self):
     ip = string.split(self.path[1:], "/")[0]
@@ -229,65 +216,197 @@ class MyVideoHandler(BaseHTTPRequestHandler):
     try:
       self.send_response(200)
       self.send_header('Content-type', 'video/mpeg2')
+      self.send_header('Accept-Ranges', 'none')
       self.end_headers()
+      Log.Debug(self.headers)
 
-      tvd = Plugin.ResourceFilePath("tivodecode")
-#      authhandler = urllib2.HTTPDigestAuthHandler()
-#      authhandler.add_password("TiVo DVR", "http://" + ip + ":80/", "tivo", Prefs.Get("MAC"))
-#      Log.Add("Starting httpstuff1")
-#      opener = urllib2.build_opener(authhandler, urllib2.HTTPCookieProcessor(CookiesJar))
-#      Log.Add("Starting httpstuff2 : " + url)
-#      urlhandle = opener.open(url)
-#      tivodecode = Popen([tvd, "-m", Prefs.Get("MAC"), "-"], stdin=urlhandle, stdout=PIPE)
+      
 
-      curlp = Popen(["/usr/bin/curl", url, "--digest", "-s", "-u", "tivo:"+Prefs.Get("MAC"), "-c", "/tmp/cookies.txt"], stdout=PIPE)
-      tivodecode = Popen([tvd, "-m", Prefs.Get("MAC"), "-"],stdin=curlp.stdout, stdout=PIPE)
+      authhandler = urllib2.HTTPDigestAuthHandler()
+      authhandler.add_password("TiVo DVR", url, "tivo", Prefs["MAK"])
+      Log.Debug("Starting httpstuff1")
+      opener= urllib2.build_opener(authhandler, urllib2.HTTPCookieProcessor(CookiesJar))
+      Log.Debug("Starting httpstuff2 : " + url)
+      req = opener.open(url)
+
+      tivodecode = Helper.Process("tivodecode", "-m", Prefs["MAK"], "-")
+      run_flag =[]
+      
+     #Thread.Create(tivoFetcher,False, req, tivodecode, self)
+      thread.start_new_thread(tivoFetcher,(req, tivodecode, self))
       while True:
-          data = tivodecode.stdout.read(4192)
+          data = tivodecode.stdout.read(4 * 1024)
+          #Log.Debug("Decoding...")
           if not data:
-              break
+                Log.Debug("Quitting tivoDecoder")              
+                break
           self.wfile.write(data)
-
-
-      #tivodecode.communicate()
+ 
 
     except IOError, e:
-      Log.Add("Got an IO Error")
+      Log.Debug("Got an IO Error")
+      Log.Debug(e)
       if hasattr(e, 'code'):
-        Log.Add("Failed with code : %s" % e.code)
+        Log.Debug("Failed with code : %s" % e.code)
       if hasattr(e, 'reason'):
-        Log.Add("Failed with reason :" + e.reason)
+        Log.Debug("Failed with reason :" + e.reason)
     except:
-      Log.Add ("Unexpected error")
+      Log.Debug ("Unexpected error : " + sys.exc_info())
 
     try:
-      kill(curlp.pid, SIGTERM)
-      kill(tivodecode.pid, SIGTERM)
+      if Platform.OS == "Windows":
+         Log.Debug("Attmpling to kill tvd:")
+         Log.Debug(tivodecode.pid)
+         if not winKill(tivodecode.pid): 
+		  Log.Debug("Couldn't kill")
+      else:
+        kill(tivodecode.pid, SIGTERM)
     except:
-      Log.Add("Self-exit of tivodecode/curl")
+      Log.Debug("Self-exit of tivodecode")
 
     return
 
   def do_POST(self):
-    Log.Add("Got a Post")
+    Log.Debug("Got a Post")
+  
+  def handle_error(self, request, client_address):
+    Log.Debug("Got an error..")
+    
 
+###########################################################3		
+            
+def tivoFetcher (req, tivodecode, httphandler ):
+      
+      CHUNK = 4 * 1024
+      while True:
+        #Log.Debug("reading from tivo....")
+        chunk = req.read(CHUNK)
+        #Log.Debug("read from tivo....")
+        if not chunk: break
+        #Log.Debug("writing to tvd...")
+        try:
+          tivodecode.stdin.write(chunk)
+        except:
+			Log.Debug("tvd closed...")
+			break
+      Log.Debug("done fetching")
+      try:
+        tivodecode.stdin.close()
+      except:
+		  Log.Debug("tvd already closed")
+			
+#################################################################        
+def winKill(pid):
+    """kill function for Win32"""
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(1, 0, pid)
+    return (0 != kernel32.TerminateProcess(handle, 0))
+    
 ####################################################################################################
 
 def TivoServerThread(ip, port):
+  
   try:
     httpserver = HTTPServer((ip, port), MyVideoHandler)
     httpserver.serve_forever()
   except :
-    Log.Add("Server Already Running")
+    Log.Debug("Server Already Running")
   
 ####################################################################################################
 
 
-def TivoVideo(count, pathNouns):
-  thread.start_new_thread(TivoServerThread, ("127.0.0.1", TIVO_PORT))
-  #playlist = PLS()
-  #playlist.AppendTrack("http://127.0.0.1:" + str(TIVO_PORT) + "/" + pathNouns[1] + "/" + pathNouns[2], base64.b64decode(pathNouns[3], "_;"))
-  #Plugin.Response["Content-Type"] = playlist.ContentType
-  #return playlist.Content()
-  url = "http://127.0.0.1:" + str(TIVO_PORT) + "/" + pathNouns[1] + "/" + pathNouns[2]
-  return Plugin.Redirect (url)
+def findTivos():
+	regtype  = '_tivo-videos._tcp'
+	timeout  = 7
+	queried  = []
+	resolved = []
+	Dict['tivos'] = {}
+	current_tivo = {}
+
+	def query_record_callback(sdRef, flags, interfaceIndex, errorCode, fullname,
+							  rrtype, rrclass, rdata, ttl):
+		if errorCode == pybonjour.kDNSServiceErr_NoError:
+			tivo_list = Dict['tivos']
+			for tivo in tivo_list:
+				if tivo_list[tivo]['hosttarget'] == fullname:
+					Log.Debug("Queried: "+tivo)
+					tivo_list[tivo]['ip'] = socket.inet_ntoa(rdata)
+			queried.append(True)
+
+
+	def resolve_callback(sdRef, flags, interfaceIndex, errorCode, fullname, hosttarget, port, txtRecord):
+		if errorCode != pybonjour.kDNSServiceErr_NoError:
+			return
+		shortName = fullname.replace('._tivo-videos._tcp.local.','').replace("\\032"," ")
+		Log.Debug("Resolved: "+shortName)
+		Dict['tivos'][shortName] = {'interfaceIndex': interfaceIndex,'port': port,'fullname': fullname,'hosttarget': hosttarget}
+		query_sdRef = pybonjour.DNSServiceQueryRecord(interfaceIndex = interfaceIndex,
+											fullname = hosttarget,
+											rrtype = pybonjour.kDNSServiceType_A,
+											callBack = query_record_callback)
+
+		try:
+			while not queried:
+				ready = select.select([query_sdRef], [], [], timeout)
+				if query_sdRef not in ready[0]:					
+					break
+				pybonjour.DNSServiceProcessResult(query_sdRef)
+			else:
+				queried.pop()
+		finally:
+			query_sdRef.close()
+
+		resolved.append(True)
+
+
+	def browse_callback(sdRef, flags, interfaceIndex, errorCode, serviceName,
+						regtype, replyDomain):
+		if errorCode != pybonjour.kDNSServiceErr_NoError:
+			return
+
+		if not (flags & pybonjour.kDNSServiceFlagsAdd):
+			return
+		Log.Debug("Browsed: "+serviceName)
+		Dict['tivos'][serviceName] = {}
+		
+	
+		resolve_sdRef = pybonjour.DNSServiceResolve(0,
+													interfaceIndex,
+													serviceName,
+													regtype,
+													replyDomain,
+													resolve_callback)
+
+		try:
+			while not resolved:
+				ready = select.select([resolve_sdRef], [], [], timeout)
+				if resolve_sdRef not in ready[0]:
+					Log.Debug('Resolve timed out')
+					break
+				pybonjour.DNSServiceProcessResult(resolve_sdRef)
+			else:
+				resolved.pop()
+		finally:
+			resolve_sdRef.close()
+
+
+	browse_sdRef = pybonjour.DNSServiceBrowse(regtype = regtype,
+											  callBack = browse_callback)
+	
+	starttime = time()
+	try:
+		try:
+			while True and (time() - starttime) < 10:
+				ready = select.select([browse_sdRef], [], [], 1)
+				if browse_sdRef in ready[0]:
+					pybonjour.DNSServiceProcessResult(browse_sdRef)
+		except KeyboardInterrupt:
+			pass
+	finally:
+		browse_sdRef.close()	
+		
+
+        
+
+        
+

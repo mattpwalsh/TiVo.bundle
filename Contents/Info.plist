@@ -15,14 +15,20 @@
 	<key>CFBundleSignature</key>
 	<string>hook</string>
 	<key>CFBundleVersion</key>
-	<string>0.7</string>
+	<string>1.0</string>
 	<key>PlexClientPlatforms</key>
 	<string>MacOSX,LGTV</string>
+	<key>PlexFrameworkVersion</key>
+	<string>2</string>
+	<key>PlexPluginCodePolicy</key>
+	<string>Elevated</string>
 	<key>PlexMediaContainer</key>
 	<array>
 		<string>TS</string>
 	</array>
-	<key>PlexPluginDebug</key>
+	<key>PlexPluginConsoleLogging</key>
+	<string>1</string>
+	<key>PlexPluginDevMode</key>
 	<string>1</string>
 	<key>PlexPluginMode</key>
 	<string>Daemon</string>
@@ -30,5 +36,6 @@
 	<array>
 		<string>MPEG2?</string>
 	</array>
+	
 </dict>
 </plist>
